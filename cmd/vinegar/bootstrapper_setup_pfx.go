@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,30 +16,24 @@ import (
 )
 
 func (b *bootstrapper) setupPrefix() error {
+	defer b.performing()()
 	b.message("Setting up Wine")
 
 	// Always initialize in case Wine changes,
 	// to prevent a dialog from appearing in normal apps.
-	if err := b.stepPrefixInit(); err != nil {
-		return fmt.Errorf("init: %w", err)
-	}
-
-	if err := b.checkPrefix(); err != nil {
+	b.message("Initializing Wineprefix", "dir", b.pfx.Dir())
+	if err := b.pfx.Init().Run(); err != nil {
 		return err
 	}
 
-	return nil
-}
+	if err := b.pfx.RegistryAdd(`HKCU\Software\Wine\WineDbg`, "ShowCrashDialog", uint(0)); err != nil {
+		return fmt.Errorf("winedbg set: %w", err)
+	}
 
-func (b *bootstrapper) stepPrefixInit() error {
-	defer b.performing()()
+	if err := b.pfx.RegistryAdd(`HKCU\Software\Wine\X11 Driver`, "UseEGL", "Y"); err != nil {
+		return fmt.Errorf("egl set: %w", err)
+	}
 
-	b.message("Initializing Wineprefix", "dir", b.pfx.Dir())
-	return b.pfx.Init().Run()
-}
-
-func (b *bootstrapper) checkPrefix() error {
-	b.message("Checking Wineprefix")
 	// Latest versions of studio require a implemented call, check if the given
 	// prefix supports it
 	if b.cfg.Studio.ForcedVersion != "" {
@@ -46,6 +41,8 @@ func (b *bootstrapper) checkPrefix() error {
 		// and get a proper error afterwards :)
 		return nil
 	}
+
+	b.message("Checking Wineprefix")
 
 	f, err := peutil.Open(filepath.Join(
 		b.pfx.Dir(), "drive_c", "windows", "system32", "kernelbase.dll"))
@@ -64,24 +61,23 @@ func (b *bootstrapper) checkPrefix() error {
 	if !slices.ContainsFunc(es, func(e peutil.Export) bool {
 		return e.Name == "VirtualProtectFromApp"
 	}) {
-		// TODO: actually give a solution to the user
-		return errors.New("wine installation cannot run studio")
+		return errors.New("Wine installation cannot run studio; update wine to >=10.13")
 	}
 
 	return nil
 }
 
-func (b *bootstrapper) stepSetupDxvk() error {
+func (b *bootstrapper) setupDxvk() error {
 	// If DXVK is installed in the wineprefix, uninstallation
 	// won't be necessary if it's disabled as it still requires
 	// DLL overrides to be present.
-	if !b.cfg.Studio.DXVK {
+	if b.cfg.Studio.DXVK == "" {
 		return nil
 	}
 
-	b.message("Checking DXVK", "version", b.cfg.Studio.DXVKVersion)
+	new := string(b.cfg.Studio.DXVK)
+	b.message("Checking DXVK", "version", new)
 
-	new := b.cfg.Studio.DXVKVersion
 	current, err := dxvk.Version(b.pfx)
 	if err != nil {
 		return fmt.Errorf("get version: %w", err)
@@ -102,7 +98,7 @@ func (b *bootstrapper) stepSetupDxvk() error {
 	}
 
 	if err := netutil.DownloadProgress(
-		dxvk.URL(b.cfg.Studio.DXVKVersion), name, &b.pbar); err != nil {
+		dxvk.URL(new), name, &b.pbar); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 
@@ -124,54 +120,41 @@ install:
 	return nil
 }
 
-func (b *bootstrapper) webviewInstaller() string {
-	if b.cfg.Studio.WebView == "" {
-		return ""
+func (b *bootstrapper) setupWebView() error {
+	installer := filepath.Join(dirs.Cache, "webview-"+b.cfg.Studio.WebView+".exe")
+
+	new := b.cfg.Studio.WebView
+	b.message("Checking WebView", "version", new)
+
+	current := webview2.Current(b.pfx)
+	if current != "" && current != b.cfg.Studio.WebView {
+		b.message("Uninstalling WebView", "current", current, "new", new)
+		if err := webview2.Uninstall(b.pfx, current); err != nil {
+			return fmt.Errorf("uninstall: %w", err)
+		}
 	}
-	return filepath.Join(dirs.Cache, "webview-"+b.cfg.Studio.WebView+".exe")
-}
-
-func (b *bootstrapper) webviewPath() string {
-	return filepath.Join(b.pfx.Dir(), "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application", b.cfg.Studio.WebView)
-}
-
-func (b *bootstrapper) stepWebviewDownload() error {
-	name := b.webviewInstaller()
-	if name == "" {
+	if current == new || new == "" {
 		return nil
 	}
 
-	if _, err := os.Stat(name); err == nil {
-		return nil
+	if _, err := os.Stat(installer); err != nil {
+		stop := b.performing()
+		b.message("Fetching WebView", "upload", b.cfg.Studio.WebView)
+		webview2.Client.Transport.(*http.Transport).DisableCompression = true
+		d, err := webview2.Stable.Runtime(b.cfg.Studio.WebView, "x64")
+		if err != nil {
+			return fmt.Errorf("fetch: %w", err)
+		}
+		stop()
+
+		b.message("Downloading WebView", "catalog", d.Delivery.CatalogID)
+		if err := netutil.DownloadProgress(d.URL, installer, &b.pbar); err != nil {
+			return fmt.Errorf("download: %w", err)
+		}
 	}
 
-	stop := b.performing()
-	b.message("Fetching WebView", "upload", b.cfg.Studio.WebView)
-	d, err := webview2.StableLegacy.Runtime(b.cfg.Studio.WebView, "x64")
-	if err != nil {
-		return fmt.Errorf("fetch: %w", err)
-	}
-	stop()
-
-	b.message("Downloading WebView", "version", d.Version)
-	return netutil.DownloadProgress(d.URL, name, &b.pbar)
-}
-
-func (b *bootstrapper) stepWebviewInstall() error {
-	name := b.webviewInstaller()
-	path := b.webviewPath()
-
-	_, err := os.Stat(path)
-	if err == nil && name == "" {
-		b.message("Uninstalling WebView")
-
-		return os.RemoveAll(path)
-	} else if name == "" || (err == nil && name != "") {
-		return nil
-	}
-
-	b.message("Installing WebView", "path", name)
+	b.message("Installing WebView", "path", installer)
 	defer b.performing()()
 
-	return webview2.Install(b.pfx, name)
+	return webview2.Install(b.pfx, installer)
 }

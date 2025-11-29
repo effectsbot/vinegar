@@ -41,7 +41,7 @@ func (a *app) newBootstrapper() *bootstrapper {
 
 	b := bootstrapper{
 		app: a,
-		rp:  studiorpc.New(),
+		rp:  studiorpc.New(a.rbx),
 	}
 
 	builder.GetObject("window").Cast(&b.win)
@@ -76,6 +76,20 @@ func (b *bootstrapper) message(msg string, args ...any) {
 }
 
 func (b *bootstrapper) run(args ...string) error {
+	if b.win.GetApplication() != nil && b.win.IsVisible() {
+		slog.Warn("Bootstrapper currently in setup, ignoring run request")
+		return nil
+	}
+
+	gtkutil.IdleAdd(func() {
+		b.app.AddWindow(&b.win.Window)
+		b.win.Present()
+	})
+	defer gtkutil.IdleAdd(func() {
+		b.app.RemoveWindow(&b.win.Window)
+		b.win.SetVisible(false) // Incase bailed out
+	})
+
 	if err := b.setup(); err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
@@ -85,7 +99,7 @@ func (b *bootstrapper) run(args ...string) error {
 
 func (b *bootstrapper) handleRobloxLog(line string) {
 	switch {
-	case strings.Contains(line, "ANR In Progress."):
+	case strings.Contains(line, "ANR In Progress. ApplicationState: Background"):
 		// Roblox normally exits after submitting ANR data to
 		// ecsv2.roblox.com, but in Wine it does nothing.
 		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -103,23 +117,38 @@ func (b *bootstrapper) handleRobloxLog(line string) {
 		}
 	}
 
-	if b.cfg.Studio.DiscordRPC {
-		if err := b.rp.Handle(line); err != nil {
-			slog.Error("Presence handling failed", "error", err)
-		}
-	}
-
-	// 2025-08-17T13:13:37.469Z,11.469932,0238,6,Info [FLog::AnrDetector]
-	// 2025-08-17T12:54:23.583Z,1.583294,00e0,6(,(Warning|Info|Error)) [Flog::..] ...
-	_, a, ok := strings.Cut(line, ",6")
-	if ok {
-		i := strings.Index(a, " [")
-		if i > 0 && a[1:i] == "Info" && !b.cfg.Debug {
+	// time,runtime,code,code2[,level ] ...
+	{
+		entry := strings.SplitN(line, ",", 4)
+		if len(entry) < 3 {
+			slog.Log(context.Background(), slog.LevelInfo, line)
 			return
 		}
-		line = strings.TrimSpace(a[i:])
+		entry = entry[3:]
+		if len(entry) != 1 {
+			panic(entry)
+		}
+		line = entry[0]
 	}
 
+	i := strings.Index(line, " [")
+	level := "Info"
+	if i > 0 {
+		if j := strings.Index(line[:i], ","); j > 0 {
+			level = line[j+1 : i]
+		}
+		line = line[i+1:]
+	}
+
+	if b.cfg.Studio.DiscordRPC {
+		if err := b.rp.Handle(line); err != nil {
+			slog.Error("Discord Rich Presence handling failed", "err", err)
+		}
+	}
+
+	if level == "Info" && !b.cfg.Debug {
+		return
+	}
 	slog.Log(context.Background(), logging.LevelRoblox.Level(), line)
 }
 

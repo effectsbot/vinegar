@@ -38,11 +38,6 @@ func (b *bootstrapper) command(args ...string) (*wine.Cmd, error) {
 }
 
 func (b *bootstrapper) execute(args ...string) error {
-	defer gtkutil.IdleAdd(func() {
-		b.app.RemoveWindow(&b.win.Window)
-		b.win.SetVisible(false) // Incase bailed out
-	})
-
 	cmd, err := b.command(args...)
 	if err != nil {
 		return err
@@ -57,7 +52,7 @@ func (b *bootstrapper) execute(args ...string) error {
 		s := <-c
 		signal.Stop(c)
 
-		slog.Warn("Recieved signal", "signal", s)
+		slog.Warn("Received signal", "signal", s)
 
 		// Only kill Roblox if it hasn't exited
 		if cmd.ProcessState == nil {
@@ -74,6 +69,14 @@ func (b *bootstrapper) execute(args ...string) error {
 		b.procs = slices.DeleteFunc(b.procs, func(p *os.Process) bool {
 			return p == cmd.Process
 		})
+		if len(b.procs) > 0 {
+			return
+		}
+
+		// Workaround any other stray processes holding Wine up
+		// such as WebView
+		slog.Warn("No more processes left, killing Wineprefix")
+		b.pfx.Kill()
 	}()
 
 	gtkutil.IdleAdd(func() {

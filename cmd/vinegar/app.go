@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,9 +28,8 @@ type app struct {
 	rbx *rbxweb.Client
 	bus *gio.DBusConnection // nullable
 
-	// initialized only in Application::command-line
-	ctl  *control      // nullable
-	boot *bootstrapper // also set if control runs boot
+	mgr  *manager // nullable
+	boot *bootstrapper
 
 	keepLog bool
 }
@@ -43,7 +43,6 @@ func newApp() *app {
 			// an effective wrapper for Studio arguments.
 			gio.GApplicationHandlesCommandLineValue,
 		),
-		cfg: config.Default(),
 		rbx: rbxweb.NewClient(),
 	}
 
@@ -58,14 +57,12 @@ func newApp() *app {
 }
 
 func (a *app) reload() error {
-	slog.Info("Reloading!")
-
 	pfx, err := a.cfg.Prefix()
 	if err != nil {
 		return fmt.Errorf("prefix configure: %w", err)
 	}
-	pfx.Stderr = a
-	pfx.Stdout = a
+	pfx.Stderr = io.Writer(a)
+	pfx.Stdout = pfx.Stderr
 
 	if a.cfg.Debug {
 		a.rbx.Client.Transport = &debugTransport{
@@ -78,6 +75,9 @@ func (a *app) reload() error {
 }
 
 func (a *app) startup(_ gio.Application) {
+	slog.SetDefault(slog.New(
+		logging.NewHandler(os.Stderr, slog.LevelInfo)))
+
 	a.boot = a.newBootstrapper()
 
 	conn, err := gio.BusGetSync(gio.GBusTypeSessionValue, nil)
@@ -90,9 +90,9 @@ func (a *app) startup(_ gio.Application) {
 	cfg, err := config.Load()
 	if err != nil {
 		a.showError(fmt.Errorf("config error: %w", err))
-	} else {
-		a.cfg = cfg
+		return
 	}
+	a.cfg = cfg
 
 	if err := a.reload(); err != nil {
 		a.showError(err)
@@ -100,9 +100,8 @@ func (a *app) startup(_ gio.Application) {
 }
 
 func (a *app) commandLine(_ gio.Application, clPtr uintptr) int {
-	if a.keepLog {
-		// Error dialog is open currently
-		return 0
+	if a.cfg == nil || a.pfx == nil {
+		return 1
 	}
 
 	cl := gio.ApplicationCommandLineNewFromInternalPtr(clPtr)
@@ -111,11 +110,11 @@ func (a *app) commandLine(_ gio.Application, clPtr uintptr) int {
 		args = args[1:] // skip 'run' cmd
 	}
 
-	if len(args) == 1 && args[0] == "config" {
-		if a.ctl == nil {
-			a.ctl = a.newControl()
+	if len(args) == 1 && args[0] == "manage" {
+		if a.mgr == nil {
+			a.mgr = a.newManager()
 		}
-		a.ctl.win.Present()
+		a.mgr.win.Present()
 		return 0
 	}
 
@@ -152,31 +151,37 @@ func (a *app) setMime() error {
 	slog.Info("Setting as default application for browser login")
 	ok, err := selfApp.SetAsDefaultForType("x-scheme-handler/roblox-studio-auth")
 	if !ok || err != nil {
-		return fmt.Errorf("Cannot gurantee browser login: %w", err)
+		return fmt.Errorf("browser login set: %w", err)
 	}
 	return nil
 }
 
-// Write implements io.Writer for app and is used to exclusively send all
-// data recieved to the log under the WINE log level.
 func (a *app) Write(b []byte) (int, error) {
-	for line := range strings.SplitSeq(string(b), "\n") {
-		if line == "" {
-			continue
-		}
-
+	for line := range strings.SplitSeq(string(b[:len(b)-1]), "\n") {
 		// XXXX:channel:class OutputDebugStringA "[FLog::Foo] Message"
 		if a.boot != nil && len(line) >= 39 && line[19:37] == "OutputDebugStringA" {
 			// Avoid "\n" calls to OutputDebugStringA
-			if len(line) >= 87 {
+			if len(line) >= 44 {
 				a.boot.handleRobloxLog(line[39 : len(line)-1])
 			}
-			continue
+			return len(b), nil
 		}
 
-		slog.Log(context.Background(), logging.LevelWine.Level(), line)
+		a.handleWineLog(line)
 	}
 	return len(b), nil
+}
+
+func (a *app) handleWineLog(line string) {
+	if strings.Contains(line, "to unimplemented function advapi32.dll.SystemFunction036") {
+		err := errors.New("Your Wineprefix is corrupt! Please delete all data in Vinegar's settings.")
+		gtkutil.IdleAdd(func() {
+			a.pfx.Server(wine.ServerKill, "9")
+			a.showError(err)
+		})
+	}
+
+	slog.Log(context.Background(), logging.LevelWine.Level(), line)
 }
 
 func (a *app) errThread(fn func() error) {
@@ -202,10 +207,10 @@ func (a *app) showError(e error) {
 	d.SetDefaultResponse("okay")
 	d.SetResponseAppearance("open", adw.ResponseSuggestedValue)
 
-	var ccb gio.AsyncReadyCallback = func(_ uintptr, res uintptr, _ uintptr) {
+	var ccb gio.AsyncReadyCallback = func(_ uintptr, resPtr uintptr, _ uintptr) {
 		defer a.Release()
-		ar := gtkutil.AsyncResultFromInternalPtr(res)
-		r := d.ChooseFinish(ar)
+		res := gio.SimpleAsyncResultNewFromInternalPtr(resPtr)
+		r := d.ChooseFinish(res)
 		slog.Default()
 		uri := "file://" + logging.Path
 		if r == "open" {

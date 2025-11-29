@@ -7,13 +7,15 @@ import (
 	"github.com/jwijenbergh/puregotk/v4/adw"
 	"github.com/jwijenbergh/puregotk/v4/gio"
 	"github.com/jwijenbergh/puregotk/v4/gtk"
-	"github.com/vinegarhq/vinegar/internal/gtkutil"
 )
 
 func newPathRow(v reflect.Value) *adw.ActionRow {
 	row := adw.NewActionRow()
 	row.SetSubtitle(v.String())
-	row.AddCssClass("property")
+	if v.String() != "" {
+		row.AddCssClass("property")
+	}
+
 	changed := func() {
 		v.SetString(row.GetSubtitle())
 		row.ActivateActionVariant("win.save", nil)
@@ -25,17 +27,21 @@ func newPathRow(v reflect.Value) *adw.ActionRow {
 	reset.AddCssClass("flat")
 	reset.SetTooltipText("Reset to Default")
 	resetClicked := func(_ gtk.Button) {
+		if v.String() == "" {
+			row.RemoveCssClass("property")
+		}
 		row.SetSubtitle("")
 	}
 	reset.ConnectClicked(&resetClicked)
 	row.AddSuffix(&reset.Widget)
 
 	open := gtk.NewButtonFromIconName("document-open-symbolic")
+	open.AddCssClass("flat")
 	open.SetValign(gtk.AlignCenterValue)
 	openClicked := func(_ gtk.Button) {
 		dialog := gtk.NewFileDialog()
 		var ready gio.AsyncReadyCallback = func(_, resPtr, _ uintptr) {
-			res := gtkutil.AsyncResultFromInternalPtr(resPtr)
+			res := gio.SimpleAsyncResultNewFromInternalPtr(resPtr)
 			f, err := dialog.SelectFolderFinish(res)
 			if err != nil {
 				slog.Error("FileDialog error", "err", err)

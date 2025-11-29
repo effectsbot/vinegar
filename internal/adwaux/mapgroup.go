@@ -14,13 +14,8 @@ var kindEmpty = map[string]reflect.Value{
 	// FFlag 'Log' (byte) unsupported until ???
 	reflect.Bool.String():   reflect.ValueOf(true),
 	reflect.String.String(): reflect.ValueOf(""),
-	reflect.Int.String():    reflect.ValueOf(0),
+	reflect.Int64.String():  reflect.ValueOf(int64(0)),
 }
-
-var intAdjustment = gtk.NewAdjustment(0.0,
-	float64(math.MinInt), float64(math.MaxInt),
-	1.0, 4.0, 0.0,
-) // ;w;
 
 type mapGroup struct {
 	mv reflect.Value
@@ -42,7 +37,7 @@ func newMapGroup(mv reflect.Value) *adw.PreferencesGroup {
 	add.AddCssClass("flat")
 
 	new := gtk.NewPopover()
-	add.SetPopover(&new.Widget)
+	add.SetPopover(new)
 
 	addName := gtk.NewEntry()
 	addName.SetPlaceholderText("Key name to add")
@@ -142,10 +137,15 @@ func (g *mapGroup) addKeyRow(k reflect.Value) {
 			g.ActivateActionVariant("win.save", nil)
 		}
 		entry.ConnectSignal("notify::text", &changed)
-	case reflect.Int:
-		spin := adw.NewSpinRow(intAdjustment, float64(v.Int()), 0)
+	case reflect.Int64:
+		adj := gtk.NewAdjustment(0.0,
+			float64(math.MinInt), float64(math.MaxInt),
+			1.0, 4.0, 0.0,
+		) // ;w;
+		spin := adw.NewSpinRow(adj, 1, 0)
 		row = &spin.PreferencesRow
 		spin.AddSuffix(&remove.Widget)
+		spin.SetValue(float64(v.Int()))
 		changed := func() {
 			g.mv.SetMapIndex(k, reflect.ValueOf(int64(spin.GetValue())))
 			g.ActivateActionVariant("win.save", nil)

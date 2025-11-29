@@ -16,16 +16,10 @@ import (
 )
 
 func (b *bootstrapper) setup() error {
-	// Bootstrapper is currently running
-	if b.win.GetApplication() != nil {
+	if len(b.procs) > 0 {
 		slog.Info("Skipping setup!", "ver", b.bin.GUID)
 		return nil
 	}
-
-	gtkutil.IdleAdd(func() {
-		b.app.AddWindow(&b.win.Window)
-		b.win.Present()
-	})
 
 	pfxFirstRun := !b.pfx.Exists()
 
@@ -34,26 +28,24 @@ func (b *bootstrapper) setup() error {
 	}
 
 	if b.rbx.Security == "" && !pfxFirstRun {
+		stop := b.performing()
 		b.message("Acquiring user authentication")
 		if err := b.app.getSecurity(); err != nil {
 			slog.Warn("Retrieving authenticated user failed", "err", err)
 		}
+		stop()
 	}
 
-	if err := b.stepSetupDxvk(); err != nil {
-		return fmt.Errorf("dxvk dl: %w", err)
+	if err := b.setupDxvk(); err != nil {
+		return fmt.Errorf("dxvk: %w", err)
 	}
 
-	if err := b.stepWebviewDownload(); err != nil {
-		return fmt.Errorf("webview dl: %w", err)
+	if err := b.setupWebView(); err != nil {
+		return fmt.Errorf("webview: %w", err)
 	}
 
 	if err := b.setupDeployment(); err != nil {
 		return err
-	}
-
-	if err := b.stepWebviewInstall(); err != nil {
-		return fmt.Errorf("webview: %w", err)
 	}
 
 	if err := b.stepPrepareRun(); err != nil {
@@ -156,6 +148,6 @@ func (b *bootstrapper) stepChangeStudioTheme() error {
 	if b.GetStyleManager().GetDark() {
 		theme = "Dark"
 	}
-	b.message("Changing Theme", "theme", theme)
+	slog.Info("Changing Theme", "theme", theme)
 	return b.pfx.RegistryAdd(key, val, theme)
 }

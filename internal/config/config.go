@@ -3,6 +3,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
@@ -18,30 +19,53 @@ import (
 	"github.com/vinegarhq/vinegar/internal/logging"
 )
 
+// Backwards compatibility to allow:
+// 'dxvk = true' and move to 'dxvk = [version]'
+type DxvkVersion string
+
+func (v *DxvkVersion) UnmarshalTOML(data interface{}) error {
+	switch d := data.(type) {
+	case bool:
+		*v = ""
+		if d {
+			*v = "2.7.1"
+		}
+	case string:
+		*v = DxvkVersion(d)
+	default:
+		return fmt.Errorf("unsupported type: %T", d)
+	}
+	return nil
+}
+
+func (v DxvkVersion) String() string {
+	return string(v)
+}
+
 type Studio struct {
-	GameMode bool `toml:"gamemode" group:"Behavior" row:"Apply system optimizations. May improve performance."`
+	WebView  string `toml:"webview" group:"" row:"Disable if nonfunctional,entry,WebView2 Version,141.0.3537.71" title:"Web Pages"`
+	WineRoot string `toml:"wineroot" group:"" row:"Installation Directory,path"`
+	Launcher string `toml:"launcher" group:"" row:"Launcher Command (ex. gamescope)"`
 
-	ForcedGpu   string `toml:"gpu" group:"Rendering" row:"Named or Indexed GPU (ex. integrated or 0)"`
-	DXVK        bool   `toml:"dxvk" group:"Rendering" row:"Improve D3D11 compatibility by translating it to Vulkan"`
-	DXVKVersion string `toml:"dxvk_version" group:"Rendering" row:"DXVK Version"`
-	Renderer    string `toml:"renderer" group:"Rendering" row:"Studio's Graphics Mode,vals,D3D11,D3D11FL10,Vulkan,OpenGL"` // Enum reflection is impossible
+	DXVK      DxvkVersion `toml:"dxvk" group:"Rendering" row:"Improve D3D11 compatibility by translating it to Vulkan,entry,Version,2.7.1"`
+	Renderer  string      `toml:"renderer" group:"Rendering" row:"Studio's Graphics Mode,vals,D3D11,D3D11FL10,Vulkan,OpenGL"` // Enum reflection is impossible
+	ForcedGPU string      `toml:"gpu" group:"Rendering" row:"Named or Indexed GPU (ex. integrated or 0)"`
 
-	WineRoot string `toml:"wineroot" group:"Custom Wine" row:"Installation Directory,path"`
-	WebView  string `toml:"webview" group:"Custom Wine" row:"WebView2 Runtime Version"`
-	Launcher string `toml:"launcher" group:"Custom Wine" row:"Launcher Command"`
+	DiscordRPC bool `toml:"discord_rpc" group:"Behavior" row:"Display your development status on your Discord profile" title:"Share Activity on Discord"`
+	GameMode   bool `toml:"gamemode" group:"Behavior" row:"Apply system optimizations. May improve performance."`
+
+	Env    map[string]string `toml:"env" group:"Environment"`
+	FFlags rbxbin.FFlags     `toml:"fflags" group:"Fast Flags"`
 
 	ForcedVersion string `toml:"forced_version" group:"Deployment Overrides" row:"Studio Deployment Version"`
 	Channel       string `toml:"channel" group:"Deployment Overrides" row:"Studio Update Channel"`
-
-	DiscordRPC bool              `toml:"discord_rpc" group:"Behavior" row:"Display your development status on your Discord profile"`
-	Env        map[string]string `toml:"env" group:"hidden"`
-	FFlags     rbxbin.FFlags     `toml:"fflags" group:"Studio Fast Flags"`
 }
 
 type Config struct {
-	Debug  bool              `toml:"debug" group:"Behavior" row:"Enable full Wine logging and Log Roblox API requests"`
-	Studio Studio            `toml:"studio"`
-	Env    map[string]string `toml:"env" group:"Environment"`
+	Studio Studio `toml:"studio"`
+	// Only adds to Studio.Env, reserved for backwards compatibility
+	Env   map[string]string `toml:"env" group:"hidden"`
+	Debug bool              `toml:"debug" group:"Behavior" row:"Output Studio logs and Web API requests"`
 }
 
 var (
@@ -52,22 +76,25 @@ var (
 // Load will load the configuration file; if it doesn't exist, it
 // will fallback to the default configuration.
 func Load() (*Config, error) {
-	d := Default()
+	cfg := Default()
 
 	if _, err := os.Stat(dirs.ConfigPath); errors.Is(err, os.ErrNotExist) {
-		return d, nil
+		return cfg, nil
 	}
 
-	if _, err := toml.DecodeFile(dirs.ConfigPath, &d); err != nil {
-		return d, err
+	if _, err := toml.DecodeFile(dirs.ConfigPath, &cfg); err != nil {
+		return cfg, err
 	}
+
+	maps.Copy(cfg.Studio.Env, cfg.Env)
+	cfg.Env = nil
 
 	logging.LoggerLevel = slog.LevelInfo
-	if d.Debug {
+	if cfg.Debug {
 		logging.LoggerLevel = slog.LevelDebug
 	}
 
-	return d, nil
+	return cfg, nil
 }
 
 // Default returns a default configuration.
@@ -75,21 +102,20 @@ func Default() *Config {
 	return &Config{
 		Debug: false,
 
-		Env: map[string]string{
-			"WINEESYNC": "1",
-		},
+		Env: make(map[string]string),
 
 		Studio: Studio{
-			DXVK:        false,
-			DXVKVersion: "2.7",
-			WebView:     "109.0.1518.140", // Last known win7
-			GameMode:    true,
-			ForcedGpu:   "prime-discrete",
-			Renderer:    "Vulkan",
-			Channel:     "LIVE",
-			DiscordRPC:  true,
-			FFlags:      make(rbxbin.FFlags),
-			Env:         make(map[string]string),
+			DXVK:       "",
+			WebView:    "141.0.3537.71", // YMMV
+			GameMode:   true,
+			ForcedGPU:  "prime-discrete",
+			Renderer:   "D3D11",
+			Channel:    "",
+			DiscordRPC: true,
+			FFlags:     make(rbxbin.FFlags),
+			Env: map[string]string{
+				"WINEESYNC": "1",
+			},
 		},
 	}
 }
@@ -104,13 +130,7 @@ func (c *Config) Prefix() (*wine.Prefix, error) {
 		c.Studio.WineRoot,
 	)
 
-	if pfx.IsProton() {
-		// https://github.com/bottlesdevs/Bottles/issues/3485
-		c.Studio.DXVK = true
-	}
-
-	env := maps.Clone(c.Env)
-	maps.Copy(env, c.Studio.Env)
+	env := maps.Clone(c.Studio.Env)
 
 	card, err := c.Studio.card()
 	if err != nil {
@@ -128,12 +148,13 @@ func (c *Config) Prefix() (*wine.Prefix, error) {
 	}
 
 	env["WINEDEBUG"] += ",warn+debugstr" // required to read Roblox logs
+	env["XR_LOADER_DEBUG"] = "none"      // already shown in Roblox log
 	env["WINEDLLOVERRIDES"] += ";" + "dxdiagn,winemenubuilder.exe,mscoree,mshtml="
 	if !c.Debug {
-		env["WINEDEBUG"] += ",fixme-all,err-kerberos,err-ntlm"
+		env["WINEDEBUG"] += ",fixme-all,err-kerberos,err-ntlm,err-combase"
 	}
 
-	if c.Studio.DXVK {
+	if c.Studio.DXVK != "" {
 		if !c.Debug {
 			env["DXVK_LOG_LEVEL"] = "warn"
 		}
@@ -147,12 +168,14 @@ func (c *Config) Prefix() (*wine.Prefix, error) {
 		pfx.Env = append(pfx.Env, k+"="+v)
 	}
 
-	dxvk.EnvOverride(pfx, c.Studio.DXVK)
+	dxvk.EnvOverride(pfx, c.Studio.DXVK != "")
+
+	slog.Debug("Using Prefix environment", "env", pfx.Env)
 
 	if c.Studio.WineRoot != "" {
 		w := pfx.Wine("")
 		if w.Err != nil {
-			return nil, errors.New("invalid wineroot")
+			return nil, w.Err
 		}
 	}
 

@@ -19,10 +19,11 @@ func TestConfigEncode(t *testing.T) {
 
 	cfg.Debug = true
 	cfg.Env["BAR"] = "1"
-	cfg.Studio.DXVK = true
+	cfg.Studio.GameMode = false
 	cfg.Studio.WebView = ""
 	cfg.Studio.FFlags["DFIntFoo"] = 960
 	cfg.Studio.Env["FOO"] = "1"
+	delete(cfg.Env, "WINEESYNC") // It's only temporary.
 
 	if err := cfg.Encode(buf); err != nil {
 		t.Error(err)
@@ -34,7 +35,7 @@ func TestConfigEncode(t *testing.T) {
 BAR = "1"
 
 [studio]
-dxvk = true
+gamemode = false
 webview = ""
 [studio.env]
 FOO = "1"

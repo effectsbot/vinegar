@@ -4,14 +4,10 @@ package adwaux
 
 import (
 	"reflect"
-	"regexp"
 	"strings"
 
 	"github.com/jwijenbergh/puregotk/v4/adw"
 )
-
-// Transform value names to their Title Case counterparts
-var configNameExp = regexp.MustCompile(`([a-z])([A-Z])`)
 
 type StructPage struct {
 	sv     reflect.Value
@@ -42,8 +38,8 @@ func (p *StructPage) addField(sf reflect.StructField, v reflect.Value) {
 		return
 	}
 
-	groupName := sf.Tag.Get("group")
-	if groupName == "" {
+	groupName, ok := sf.Tag.Lookup("group")
+	if !ok {
 		panic("adwaux: expected group name for " + sf.Name)
 	}
 	if groupName == "hidden" {
@@ -51,7 +47,6 @@ func (p *StructPage) addField(sf reflect.StructField, v reflect.Value) {
 	}
 
 	var group *adw.PreferencesGroup
-	var ok bool
 	if v.Kind() == reflect.Map {
 		group = newMapGroup(v)
 		group.SetTitle(groupName)
@@ -67,7 +62,11 @@ func (p *StructPage) addField(sf reflect.StructField, v reflect.Value) {
 		return // MapKeyGroup was initialized
 	}
 
-	title := configNameExp.ReplaceAllString(sf.Name, `$1 $2`)
+	title := sf.Tag.Get("title")
+	if title == "" {
+		title = sf.Name
+	}
+
 	fields := strings.Split(sf.Tag.Get("row"), ",")
 	description := fields[0]
 	option := ""
@@ -86,7 +85,11 @@ func (p *StructPage) addField(sf reflect.StructField, v reflect.Value) {
 		path := newPathRow(v)
 		path.SetTitle(description)
 		group.Add(&path.Widget)
-
+	case option == "entry":
+		opt := newOptionEntryRow(v, fields[2], fields[3])
+		opt.SetTitle(title)
+		opt.SetSubtitle(description)
+		group.Add(&opt.Widget)
 	case k == reflect.Bool:
 		sw := newSwitchRow(v)
 		sw.SetTitle(title)
