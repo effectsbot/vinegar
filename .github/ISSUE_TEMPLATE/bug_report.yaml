@@ -54,5 +54,9 @@ body:
     attributes:
       label: Steps for reproducing the problem
       description: Steps are to be given in chronological order.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
     validations:
       required: true
